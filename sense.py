@@ -1,17 +1,20 @@
-#!/usr/bin/env python
-
 from sense_hat import SenseHat
-import copy
+from copy import deepcopy
 
 E = 0.1
+
 MIN_TEMP = -40
 MAX_TEMP = abs(MIN_TEMP)
+
 MIN_PRESSURE = 950
 MAX_PRESSURE = 1050
+
 MIN_HUMIDITY = 0
 MAX_HUMIDITY = 100
+
 MIN_DEGREE = 0
 MAX_DEGREE = 360
+
 WHITE = (0xFF, 0xFF, 0xFF)
 BLACK = (0x00, 0x00, 0x00)
 
@@ -24,17 +27,37 @@ def set_pixel(hat, idx, color):
 
 class View:
   """View interface"""
+  def setup(self, hat, **kwargs):
+    pass
+  
   def draw(self, hat):
     raise NotImplementedError
 
 
 class ColorCalc:
   """Computes color for value from given range"""
-  def __init__(self, min_value, max_value):
+  def __init__(self, min_value, max_value, reverse=False):
     self.min_value = min_value
     self.levels = max_value - min_value
+    self.reverse = reverse
     self.prev_value = None
     self.color = None
+    
+  def __copy(self):
+    return type(self)(self.min_value, self.max_value)
+    
+  def __deepcopy__(self, memo):
+    id_self = id(self)
+    _copy = memo.get(id_self)
+    if _copy is None:
+      _copy = type(self)(
+        deepcopy(self.min_value, memo), 
+        deepcopy(self.levels, memo)
+      )
+      
+      memo[id_self] = _copy 
+        
+    return _copy
 
   def compute(self, value):
     if (
@@ -52,43 +75,53 @@ class ColorCalc:
 
     saturation = 255 * (score * 2 - 1) if score > 0.5 else 255 * (1 - score * 2)
     saturation = int(saturation)
-
-    self.color = (saturation, 0, 0) if score > 0.5 else (0, 0, saturation)
+    
+    if score > 0.5:
+      if not self.reverse:
+        self.color = (saturation, 0, 0)
+      else:
+        self.color = (0, 0, saturation)
+    else:
+      if not self.reverse:
+        self.color = (0, 0, saturation)
+      else:
+        self.color  = (saturation, 0, 0)
 
     return self.color
 
-
-class TemperatureView(View):
-  def __init__(self, color_calc):
+class FullScreenView(View):
+  def __init__(self, color_calc, property, **kwargs):
     self.color_calc = color_calc
-        
+    self.property = property
+    self.config = kwargs
+
   def draw(self, hat):
-    temp = hat.temp
-    color = self.color_calc.compute(temp)
+    value = getattr(hat, self.property)
+    
+    if value is None:
+      raise ValueError("Unknown property: {}".format(self.property))
+      
+    color = self.color_calc.compute(value)
     
     for idx in range(48):
       set_pixel(hat, idx, color)
-
-class PressureView(View):
-  def __init__(self, color_calc):
-    self.color_calc = color_calc
-
-  def draw(self, hat):
-    pressure = hat.pressure
-    color = self.color_calc.compute(pressure)
-    
-    for idx in range(48):
-      set_pixel(hat, idx, color)
-
-
-class OrientationView(View):
-  def __init__(self, color_calc_roll, color_calc_pitch, color_calc_yaw):
+      
+class AxisView(View):
+  def __init__(self, color_calc_roll, color_calc_pitch, color_calc_yaw, **kwargs):
     self.color_calc_roll = color_calc_roll
     self.color_calc_pitch = color_calc_pitch
     self.color_calc_yaw = color_calc_yaw
+    self.config = kwargs
+    
+  def setup(self, hat):
+    compass_state = self.config.get('compass', False)
+    gyro_state = self.config.get('gyro', False)
+    accel_state = self.config.get('accel', False)
+    
+    hat.set_imu_config(compass_state, gyro_state, accel_state)
 
   def draw(self, hat):
-    orientation = hat.orientation
+    orientation = hat.get_gyroscope()
 
     roll = orientation.get('roll', 0)
     pitch = orientation.get('pitch', 0)
@@ -108,18 +141,6 @@ class OrientationView(View):
       set_pixel(hat, idx, color_yaw)
 
 
-class HumidityView(View):
-  def __init__(self, color_calc):
-    self.color_calc = color_calc
-
-  def draw(self, hat):
-    humidity = hat.humidity
-    color = self.color_calc.compute(humidity)
-
-    for idx in range(48):
-      set_pixel(hat, idx, color)
-
-
 class EventHandler:
   def __init__(self, hat):
       self.hat = hat
@@ -134,7 +155,17 @@ class EventHandler:
 
     self.views.append(view)
 
-  def handle_event(self, event):
+  def event_loop(self):
+    self.current_idx = 0
+    self.__set_new_view(0)
+
+    while True:
+      for event in self.hat.stick.get_events():
+        self.__handle_event(event)
+
+      self.current_view.draw(self.hat)
+
+  def __handle_event(self, event):
     if event.action == 'pressed':
       new_idx = self.current_idx
       new_idx += { 'left': -1, 'right': +1 }.get(event.direction, 0)
@@ -145,42 +176,54 @@ class EventHandler:
           new_idx = 0
         elif new_idx < 0:
           new_idx = max_idx
-          
-        # turn off current idx
-        set_pixel(self.hat, 48 + self.current_idx, BLACK)
         
-        # turn on new
-        set_pixel(self.hat, 48 + new_idx, WHITE)
-  
-        self.current_idx = new_idx
-        self.current_view = self.views[self.current_idx]
+        self.__set_new_view(new_idx)
+      
+  def __set_new_view(self, new_idx):
+    # turn off current idx
+    set_pixel(self.hat, 48 + self.current_idx, BLACK)
+    
+    # turn on new
+    set_pixel(self.hat, 48 + new_idx, WHITE)
 
-  def event_loop(self):
-    self.current_idx = 0
-    set_pixel(self.hat, 48, WHITE)
+    self.current_idx = new_idx
     self.current_view = self.views[self.current_idx]
-    while True:
-      for event in self.hat.stick.get_events():
-        self.handle_event(event)
-
-      self.current_view.draw(self.hat)
+    self.current_view.setup(self.hat)
 
 # Program begins here
 hat = SenseHat()
-hat.set_imu_config(True, True, True)
 hat.clear()
 
 event_handler = EventHandler(hat)
 
-event_handler.register_view(TemperatureView(ColorCalc(MIN_TEMP, MAX_TEMP)))
-event_handler.register_view(PressureView(ColorCalc(MIN_PRESSURE, MAX_PRESSURE)))
-event_handler.register_view(HumidityView(ColorCalc(MIN_HUMIDITY, MAX_HUMIDITY)))
+degree_color_calc = ColorCalc(MIN_DEGREE, MAX_DEGREE)
 
-calc_roll = ColorCalc(MIN_DEGREE, MAX_DEGREE)
-calc_pitch = ColorCalc(MIN_DEGREE, MAX_DEGREE)
-calc_yaw = ColorCalc(MIN_DEGREE, MAX_DEGREE)
-orientation_view = OrientationView(calc_roll, calc_pitch, calc_yaw)
+gyroscope_view = AxisView(
+  deepcopy(degree_color_calc),
+  deepcopy(degree_color_calc),
+  deepcopy(degree_color_calc),
+  gyroscope=True
+)
 
-event_handler.register_view(orientation_view)
+accel_view = AxisView(
+  deepcopy(degree_color_calc),
+  deepcopy(degree_color_calc),
+  deepcopy(degree_color_calc),
+  accel=True
+)
+
+compas_view = AxisView(
+  deepcopy(degree_color_calc),
+  deepcopy(degree_color_calc),
+  deepcopy(degree_color_calc),
+  compas=True
+)
+
+event_handler.register_view(FullScreenView(ColorCalc(MIN_TEMP, MAX_TEMP), 'temperature'))
+event_handler.register_view(FullScreenView(ColorCalc(MIN_PRESSURE, MAX_PRESSURE), 'pressure'))
+event_handler.register_view(FullScreenView(ColorCalc(MIN_HUMIDITY, MAX_HUMIDITY, reverse=True), 'humidity'))
+event_handler.register_view(gyroscope_view)
+event_handler.register_view(accel_view)
+event_handler.register_view(compas_view)
 
 event_handler.event_loop()
