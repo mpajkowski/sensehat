@@ -7,6 +7,8 @@ MIN_TEMP = -40
 MAX_TEMP = abs(MIN_TEMP)
 MIN_PRESSURE = 950
 MAX_PRESSURE = 1050
+MIN_HUMIDITY = 0
+MAX_HUMIDITY = 100
         
 class View:
   """View interface"""
@@ -21,7 +23,7 @@ class ColorCalc:
     self.prev_value = None
     self.color = None
 
-  def compute_color(self, value):
+  def compute(self, value):
     if (
       self.prev_value is not None
         and self.color is not None
@@ -44,26 +46,38 @@ class ColorCalc:
 
 
 class TemperatureView(View):
-  def __init__(self):
-    self.level = ColorCalc(MIN_TEMP, MAX_TEMP)
+  def __init__(self, color_calc):
+    self.color_calc = color_calc
         
   def draw(self, hat):
     temp = hat.temp
-    color = self.level.compute_color(temp)
+    color = self.color_calc.compute(temp)
     pixels = [color for _ in range(64)]
 
     hat.set_pixels(pixels)
 
 class PressureView(View):
-  def __init__(self):
-    self.level = ColorCalc(MIN_PRESSURE, MAX_PRESSURE)
+  def __init__(self, color_calc):
+    self.color_calc = color_calc
         
   def draw(self, hat):
     pressure = hat.pressure
-    color = self.level.compute_color(pressure)
+    color = self.color_calc.compute(pressure)
     pixels = [color for _ in range(64)]
 
     hat.set_pixels(pixels)
+    
+class HumidityView(View):
+  def __init__(self, color_calc):
+    self.color_calc = color_calc
+        
+  def draw(self, hat):
+    humidity = hat.humidity
+    color = self.color_calc.compute(humidity)
+    pixels = [color for _ in range(64)]
+
+    hat.set_pixels(pixels)
+  
 
 class EventHandler:
   def __init__(self, hat):
@@ -108,6 +122,7 @@ hat = SenseHat()
 hat.clear()
 
 event_handler = EventHandler(hat)
-event_handler.register_view(TemperatureView())
-event_handler.register_view(PressureView())
+event_handler.register_view(TemperatureView(ColorCalc(MIN_TEMP, MAX_TEMP)))
+event_handler.register_view(PressureView(ColorCalc(MIN_PRESSURE, MAX_PRESSURE)))
+event_handler.register_view(HumidityView(ColorCalc(MIN_HUMIDITY, MAX_HUMIDITY)))
 event_handler.event_loop()
